@@ -32,7 +32,7 @@ class MainActivity : Activity() {
             textSize = 22f
         }
         val keyBox = EditText(this).apply {
-            hint = "Anthropic API key (sk-ant-...)"
+            hint = "API key (optional, leave empty for offline Ted)"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             setText(prefs.getString("apikey", ""))
         }

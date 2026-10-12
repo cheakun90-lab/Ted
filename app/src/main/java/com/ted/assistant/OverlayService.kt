@@ -8,6 +8,7 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.media.MediaPlayer
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -50,6 +51,7 @@ class OverlayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
 
     override fun onDestroy() {
+        player?.release(); player = null
         hidePanel()
         tedView?.let { wm.removeView(it) }
         tedView = null
@@ -101,10 +103,122 @@ class OverlayService : Service() {
         tedView = iv
     }
 
+    private val resetMood = Runnable { tedView?.setImageResource(R.drawable.ted_neutral) }
+
     private fun setMood(mood: String) {
         var id = resources.getIdentifier("ted_$mood", "drawable", packageName)
         if (id == 0) id = R.drawable.ted_neutral
         tedView?.setImageResource(id)
+        ui.removeCallbacks(resetMood)
+        if (mood != "neutral") {
+            ui.postDelayed(resetMood, 20000)
+            playSound(mood)
+        }
+    }
+
+    private var player: MediaPlayer? = null
+
+    private fun playSound(mood: String) {
+        val id = resources.getIdentifier("ted_$mood", "raw", packageName)
+        if (id == 0) return
+        try {
+            player?.release()
+            player = MediaPlayer.create(this, id)?.apply {
+                setOnCompletionListener { mp -> mp.release(); if (player === mp) player = null }
+                start()
+            }
+        } catch (e: Exception) { /* no sound, no problem */ }
+    }
+
+    // ---------- Offline Ted (no API key needed) ----------
+    private var userName: String? = null
+
+    private fun has(t: String, vararg words: String) = words.any { t.contains(it) }
+
+    private fun localReply(raw: String): Pair<String, String> {
+        val t = raw.lowercase().trim()
+        val who = userName ?: "friend"
+
+        Regex("(?:my name is|i am called|call me)\\s+([a-z]+)").find(t)?.let {
+            userName = it.groupValues[1].replaceFirstChar { c -> c.uppercase() }
+            return "happy" to "Nice to meet you, $userName. I'll remember that."
+        }
+        if (has(t, "your name", "who are you"))
+            return "neutral" to listOf(
+                "I'm Ted. I live on your screen.",
+                "Ted. Small, pale, always watching. Kidding. Mostly."
+            ).random()
+        if (has(t, "how are you", "how r u", "how you doing", "what's up", "whats up"))
+            return listOf(
+                "happy" to "I'm good, $who. Sitting here. It's nice.",
+                "sleepy" to "A little sleepy, honestly.",
+                "neutral" to "Fine. Just floating around."
+            ).random()
+        if (has(t, "hello", "hi ", "hey", "yo ", "sup") || t == "hi" || t == "yo")
+            return listOf(
+                "happy" to "Hi $who!",
+                "happy" to "Hey. I was hoping you'd tap me.",
+                "surprised" to "Oh! You're here."
+            ).random()
+        if (has(t, "love you", "i like you", "best", "good job", "thank", "thanks", "you're cool", "youre cool"))
+            return "happy" to listOf(
+                "Aww. Thanks, $who.",
+                "That makes me happy.",
+                "You're nice. I like you too."
+            ).random()
+        if (has(t, "sad", "cry", "lonely", "bad day", "depressed", "miss "))
+            return "sad" to listOf(
+                "I'm sorry, $who. I'm here with you.",
+                "That sounds hard. Want to tell me more?",
+                "I'll sit with you for a bit."
+            ).random()
+        if (has(t, "hate", "angry", "mad ", "annoy", "stupid", "shut up"))
+            return "angry" to listOf(
+                "Hmph. That makes me mad too.",
+                "Grr. Who do I need to glare at?",
+                "Okay, okay. Deep breath, $who."
+            ).random()
+        if (has(t, "tired", "sleep", "goodnight", "good night", "bed", "nap"))
+            return "sleepy" to listOf(
+                "Zzz... oh. Sorry. Sleepy.",
+                "Good night, $who. I'll watch the screen.",
+                "Rest. I'll be here."
+            ).random()
+        if (has(t, "wow", "really", "no way", "omg", "what!", "whoa"))
+            return "surprised" to listOf(
+                "Wait, really?!",
+                "Whoa.",
+                "I did not see that coming."
+            ).random()
+        if (has(t, "joke", "funny", "make me laugh"))
+            return "happy" to listOf(
+                "Why did the alien cross the road? To get to the other galaxy.",
+                "I told my phone a secret. Now it's on every screen.",
+                "I'd tell you a joke about space, but it's out of this world."
+            ).random()
+        if (has(t, "bored", "boring"))
+            return "neutral" to listOf(
+                "Want to play 20 questions? Think of something.",
+                "Drag me around the screen. It's fun.",
+                "Tell me about your day, $who."
+            ).random()
+        if (has(t, "food", "hungry", "eat"))
+            return "happy" to "Food sounds good. I don't eat, but I like hearing about it."
+        if (has(t, "bye", "see you", "gtg", "later"))
+            return "sad" to "Bye, $who. Tap me when you're back."
+        if (t.endsWith("?"))
+            return listOf(
+                "neutral" to "Hmm. I don't know. What do you think?",
+                "surprised" to "Good question, $who.",
+                "neutral" to "Maybe. I'm just a little guy."
+            ).random()
+        return listOf(
+            "neutral" to "Mm-hm.",
+            "neutral" to "Tell me more.",
+            "happy" to "I like talking with you.",
+            "surprised" to "Oh?",
+            "neutral" to "I'm listening, $who."
+        ).random()
     }
 
     // ---------- Chat panel ----------
@@ -139,7 +253,7 @@ class OverlayService : Service() {
 
         val log = TextView(this).apply {
             setTextColor(Color.parseColor("#DDDDDD")); textSize = 15f
-            text = "Ted: Hi. I'm Ted.\n\n"
+            text = "Ted: Hi. I'm Ted. Say something.\n\n"
         }
         val sv = ScrollView(this).apply {
             addView(log)
@@ -185,7 +299,15 @@ class OverlayService : Service() {
     // ---------- Claude ----------
     private fun sendMessage(text: String) {
         val key = getSharedPreferences("ted", MODE_PRIVATE).getString("apikey", "") ?: ""
-        if (key.isEmpty()) { append("Ted: I need an API key. Open the Ted app and add one.\n\n"); return }
+        if (key.isEmpty()) {
+            append("You: $text\n\n")
+            val (mood, reply) = localReply(text)
+            ui.postDelayed({
+                setMood(mood)
+                append("Ted: $reply\n\n")
+            }, 700)
+            return
+        }
 
         append("You: $text\n\n")
         history.put(JSONObject().put("role", "user").put("content", text))
