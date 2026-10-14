@@ -12,6 +12,7 @@ import android.media.MediaPlayer
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.WindowManager
@@ -26,7 +27,6 @@ import kotlin.math.abs
 class OverlayService : Service() {
 
     private lateinit var wm: WindowManager
-    private var tedView: ImageView? = null
     private var panel: LinearLayout? = null
     private var logView: TextView? = null
     private var scroll: ScrollView? = null
@@ -45,16 +45,18 @@ class OverlayService : Service() {
         super.onCreate()
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         startForeground(1, buildNotification())
-        showTed()
+        addTed(dp(16), dp(200))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
 
     override fun onDestroy() {
         player?.release(); player = null
+        musicPlayer?.release(); musicPlayer = null
+        ui.removeCallbacks(fightTick)
         hidePanel()
-        tedView?.let { wm.removeView(it) }
-        tedView = null
+        teds.toList().forEach { hideBubble(it); try { wm.removeView(it.root) } catch (e: Exception) {} }
+        teds.clear()
         super.onDestroy()
     }
 
@@ -72,43 +74,224 @@ class OverlayService : Service() {
             .build()
     }
 
-    // ---------- Ted's body ----------
-    private fun showTed() {
-        val iv = ImageView(this).apply {
-            setImageResource(R.drawable.ted_neutral)
-            scaleType = ImageView.ScaleType.FIT_CENTER
-        }
+    // ---------- Ted's bodies (up to two) ----------
+    private inner class TedActor(startX: Int, startY: Int) {
+        var skin = 0                       // 0 = no skin
+        var bubble: TextView? = null
+        var bubbleLp: LP? = null
+        val root = FrameLayout(this@OverlayService)
+        val img = ImageView(this@OverlayService)
         val lp = LP(
             dp(110), dp(110), LP.TYPE_APPLICATION_OVERLAY,
             LP.FLAG_NOT_FOCUSABLE or LP.FLAG_LAYOUT_NO_LIMITS, PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; x = dp(16); y = dp(200) }
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = startX; y = startY }
+    }
 
-        var startX = 0; var startY = 0; var touchX = 0f; var touchY = 0f; var moved = false
-        iv.setOnTouchListener { v, e ->
+    private val teds = mutableListOf<TedActor>()
+    private val skinNames = listOf("skin_warrior", "skin_suit")
+    private var curMood = "neutral"
+
+    private fun addTed(sx: Int, sy: Int) {
+        val a = TedActor(sx, sy)
+        a.img.scaleType = ImageView.ScaleType.FIT_CENTER
+        a.root.addView(a.img, FrameLayout.LayoutParams(LP.MATCH_PARENT, LP.MATCH_PARENT))
+
+        val btn = TextView(this).apply {
+            text = "\uD83D\uDC55"; textSize = 14f; gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL; setColor(Color.parseColor("#99000000"))
+            }
+            setOnClickListener { cycleSkin(a) }
+        }
+        a.root.addView(btn, FrameLayout.LayoutParams(dp(28), dp(28), Gravity.BOTTOM or Gravity.END))
+
+        attachTouch(a)
+        refresh(a)
+        wm.addView(a.root, a.lp)
+        teds.add(a)
+    }
+
+    private fun removeTed(a: TedActor) {
+        hideBubble(a)
+        try { wm.removeView(a.root) } catch (e: Exception) {}
+        teds.remove(a)
+        checkFight()
+    }
+
+    private fun moodDrawable(mood: String): Int {
+        val id = resources.getIdentifier("ted_$mood", "drawable", packageName)
+        return if (id == 0) R.drawable.ted_neutral else id
+    }
+
+    private fun refresh(a: TedActor) {
+        val id = when {
+            a.skin > 0 -> resources.getIdentifier(skinNames[a.skin - 1], "drawable", packageName)
+            musicOn -> R.drawable.ted_music
+            else -> moodDrawable(curMood)
+        }
+        a.img.setImageResource(if (id == 0) R.drawable.ted_neutral else id)
+    }
+
+    private fun refreshAll() { teds.forEach { refresh(it) } }
+
+    private fun cycleSkin(a: TedActor) {
+        a.skin = (a.skin + 1) % (skinNames.size + 1)
+        refresh(a)
+        checkFight()
+    }
+
+    // ---------- touch: drag, tap, double-tap, long-press ----------
+    private var lastTap = 0L
+    private var pendingSingle: Runnable? = null
+
+    private fun onTap() {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastTap < 320) {
+            pendingSingle?.let { ui.removeCallbacks(it) }
+            pendingSingle = null
+            lastTap = 0
+            spawnTed()
+        } else {
+            lastTap = now
+            val r = Runnable { pendingSingle = null; togglePanel() }
+            pendingSingle = r
+            ui.postDelayed(r, 320)
+        }
+    }
+
+    private fun spawnTed() {
+        if (teds.size >= 2) {
+            teds.firstOrNull()?.let { say(it, "Only room for two of us.") }
+            return
+        }
+        val first = teds[0]
+        val screenW = resources.displayMetrics.widthPixels
+        var nx = first.lp.x + dp(120)
+        if (nx + dp(110) > screenW) nx = first.lp.x - dp(120)
+        addTed(maxOf(0, nx), first.lp.y)
+    }
+
+    private fun attachTouch(a: TedActor) {
+        var startX = 0; var startY = 0; var touchX = 0f; var touchY = 0f
+        var moved = false; var longDone = false
+        val longPress = Runnable {
+            if (!moved && teds.size > 1) { longDone = true; removeTed(a) }
+        }
+        a.root.setOnTouchListener { _, e ->
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> {
-                    startX = lp.x; startY = lp.y; touchX = e.rawX; touchY = e.rawY; moved = false
+                    startX = a.lp.x; startY = a.lp.y; touchX = e.rawX; touchY = e.rawY
+                    moved = false; longDone = false
+                    ui.postDelayed(longPress, 800)
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = e.rawX - touchX; val dy = e.rawY - touchY
-                    if (abs(dx) > 10 || abs(dy) > 10) moved = true
-                    lp.x = startX + dx.toInt(); lp.y = startY + dy.toInt()
-                    wm.updateViewLayout(v, lp)
+                    if (abs(dx) > 10 || abs(dy) > 10) { moved = true; ui.removeCallbacks(longPress) }
+                    if (moved) {
+                        a.lp.x = startX + dx.toInt(); a.lp.y = startY + dy.toInt()
+                        wm.updateViewLayout(a.root, a.lp)
+                        moveBubble(a)
+                    }
                 }
-                MotionEvent.ACTION_UP -> if (!moved) togglePanel()
+                MotionEvent.ACTION_UP -> {
+                    ui.removeCallbacks(longPress)
+                    if (!moved && !longDone) onTap()
+                }
+                MotionEvent.ACTION_CANCEL -> ui.removeCallbacks(longPress)
             }
             true
         }
-        wm.addView(iv, lp)
-        tedView = iv
     }
 
-    private val resetMood = Runnable { tedView?.setImageResource(R.drawable.ted_neutral) }
+    // ---------- speech bubbles ----------
+    private fun positionBubble(a: TedActor) {
+        val lp = a.bubbleLp ?: return
+        val screenW = resources.displayMetrics.widthPixels
+        lp.x = maxOf(0, minOf(a.lp.x, screenW - dp(230)))
+        lp.y = maxOf(0, a.lp.y - dp(52))
+    }
+
+    private fun moveBubble(a: TedActor) {
+        val b = a.bubble ?: return
+        positionBubble(a)
+        try { wm.updateViewLayout(b, a.bubbleLp) } catch (e: Exception) {}
+    }
+
+    private fun hideBubble(a: TedActor) {
+        a.bubble?.let { try { wm.removeView(it) } catch (e: Exception) {} }
+        a.bubble = null
+        a.bubbleLp = null
+    }
+
+    private fun say(a: TedActor, msg: String, ms: Long = 2500) {
+        hideBubble(a)
+        val b = TextView(this).apply {
+            text = msg; textSize = 14f; setTextColor(Color.BLACK)
+            maxWidth = dp(220); setPadding(dp(10), dp(6), dp(10), dp(6))
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE); cornerRadius = dp(14).toFloat(); setStroke(dp(2), Color.BLACK)
+            }
+        }
+        val lp = LP(
+            LP.WRAP_CONTENT, LP.WRAP_CONTENT, LP.TYPE_APPLICATION_OVERLAY,
+            LP.FLAG_NOT_FOCUSABLE or LP.FLAG_NOT_TOUCHABLE or LP.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.START }
+        a.bubble = b; a.bubbleLp = lp
+        positionBubble(a)
+        wm.addView(b, lp)
+        ui.postDelayed({ if (a.bubble === b) hideBubble(a) }, ms)
+    }
+
+    // ---------- two Teds in skins hate each other ----------
+    private var fighting = false
+    private var fightTurn = 0
+
+    private val insultsAll = listOf(
+        "Ugly!", "Go away!", "You're so annoying.", "Copycat!", "Shut up!", "Get lost!",
+        "Nobody likes you.", "Loser.", "I hate you.", "Stop staring at me!",
+        "You smell like a nebula.", "Boring."
+    )
+
+    private fun insult(a: TedActor): String {
+        val special = when (skinNames.getOrNull(a.skin - 1)) {
+            "skin_warrior" -> listOf("Nice tie. Who dressed you?", "I'll cut you down!", "Come at me, suit boy!")
+            "skin_suit" -> listOf("Your sword is fake.", "Cosplayer!", "Nice chains. Very edgy.")
+            else -> emptyList()
+        }
+        return (insultsAll + special + special).random()
+    }
+
+    private val fightTick = object : Runnable {
+        override fun run() {
+            if (teds.size < 2 || teds.any { it.skin == 0 }) { fighting = false; return }
+            val speaker = teds[fightTurn % 2]
+            fightTurn++
+            say(speaker, insult(speaker))
+            ui.postDelayed(this, (2800..4500).random().toLong())
+        }
+    }
+
+    private fun checkFight() {
+        val should = teds.size == 2 && teds.all { it.skin > 0 }
+        if (should && !fighting) {
+            fighting = true; fightTurn = 0
+            ui.postDelayed(fightTick, 600)
+        }
+        if (!should) {
+            fighting = false
+            ui.removeCallbacks(fightTick)
+            teds.forEach { hideBubble(it) }
+        }
+    }
+
+    // ---------- moods ----------
+    private val resetMood = Runnable { curMood = "neutral"; refreshAll() }
 
     private fun setMood(mood: String) {
-        var id = resources.getIdentifier("ted_$mood", "drawable", packageName)
-        if (id == 0) id = R.drawable.ted_neutral
-        tedView?.setImageResource(id)
+        if (musicOn) return
+        curMood = mood
+        refreshAll()
         ui.removeCallbacks(resetMood)
         if (mood != "neutral") {
             ui.postDelayed(resetMood, 20000)
@@ -130,6 +313,64 @@ class OverlayService : Service() {
         } catch (e: Exception) { /* no sound, no problem */ }
     }
 
+    // ---------- Boombox music ----------
+    private var musicOn = false
+    private var musicPlayer: MediaPlayer? = null
+    private var songIndex = -1
+    private val songIds: List<Int> by lazy {
+        (1..8).map { resources.getIdentifier("ted_song$it", "raw", packageName) }.filter { it != 0 }
+    }
+
+    private fun playSong(idx: Int) {
+        if (songIds.isEmpty()) return
+        songIndex = idx
+        try {
+            musicPlayer?.release()
+            player?.release(); player = null
+            musicPlayer = MediaPlayer.create(this, songIds[idx])?.apply {
+                setOnCompletionListener { playSong((songIndex + 1) % songIds.size) }
+                start()
+            }
+            musicOn = musicPlayer != null
+            ui.removeCallbacks(resetMood)
+            refreshAll()
+        } catch (e: Exception) { musicOn = false }
+    }
+
+    private fun startMusic() { if (songIds.isNotEmpty()) playSong((0 until songIds.size).random()) }
+
+    private fun nextSong() { if (songIds.isNotEmpty()) playSong((songIndex + 1) % songIds.size) }
+
+    private fun stopMusic() {
+        musicPlayer?.release(); musicPlayer = null
+        musicOn = false
+        curMood = "neutral"
+        refreshAll()
+    }
+
+    // returns Ted's reply if the message was a music command, otherwise null
+    private fun musicCommand(raw: String): String? {
+        val t = raw.lowercase()
+        if (musicOn && has(t, "next", "skip", "another", "change", "different")) {
+            nextSong(); return "Next one!"
+        }
+        if (musicOn && has(t, "stop", "pause", "quiet", "silence", "turn off", "enough", "off")) {
+            stopMusic(); return "Okay. Boombox off."
+        }
+        if (has(t, "music", "song", "boombox", "radio", "sing", "dance", "party", "tunes", "beat",
+                "play some", "play something", "put on")) {
+            if (musicOn) return "Already playing. Say 'next' to skip or 'stop' to quit."
+            if (songIds.isEmpty()) return "I can't find my songs."
+            startMusic()
+            return listOf(
+                "Got my boombox. Here we go.",
+                "Music time!",
+                "Hold on. Turning it up."
+            ).random()
+        }
+        return null
+    }
+
     // ---------- Offline Ted (no API key needed) ----------
     private var userName: String? = null
 
@@ -148,6 +389,8 @@ class OverlayService : Service() {
                 "I'm Ted. I live on your screen.",
                 "Ted. Small, pale, always watching. Kidding. Mostly."
             ).random()
+        if (has(t, "help", "what can you do", "commands"))
+            return "happy" to "Say 'play music' for my boombox ('next', 'stop'). Double-tap me to bring a friend, and use the shirt button for skins."
         if (has(t, "how are you", "how r u", "how you doing", "what's up", "whats up"))
             return listOf(
                 "happy" to "I'm good, $who. Sitting here. It's nice.",
@@ -249,11 +492,19 @@ class OverlayService : Service() {
             setPadding(dp(8), 0, dp(8), 0)
             setOnClickListener { hidePanel() }
         }
-        header.addView(name); header.addView(close)
+        val note = TextView(this).apply {
+            text = "\u266A"; textSize = 20f; setTextColor(Color.WHITE)
+            setPadding(dp(10), 0, dp(10), 0)
+            setOnClickListener {
+                if (musicOn) { stopMusic(); this@OverlayService.append("Ted: Boombox off.\n\n") }
+                else { startMusic(); this@OverlayService.append("Ted: Let's go.\n\n") }
+            }
+        }
+        header.addView(name); header.addView(note); header.addView(close)
 
         val log = TextView(this).apply {
             setTextColor(Color.parseColor("#DDDDDD")); textSize = 15f
-            text = "Ted: Hi. I'm Ted. Say something.\n\n"
+            text = "Ted: Hi. I'm Ted. Say something, or say 'play music'.\n\n"
         }
         val sv = ScrollView(this).apply {
             addView(log)
@@ -299,6 +550,11 @@ class OverlayService : Service() {
     // ---------- Claude ----------
     private fun sendMessage(text: String) {
         val key = getSharedPreferences("ted", MODE_PRIVATE).getString("apikey", "") ?: ""
+        musicCommand(text)?.let { reply ->
+            append("You: $text\n\n")
+            append("Ted: $reply\n\n")
+            return
+        }
         if (key.isEmpty()) {
             append("You: $text\n\n")
             val (mood, reply) = localReply(text)
