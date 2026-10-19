@@ -360,6 +360,9 @@ class OverlayService : Service() {
     private fun cl(v: Int) = v.coerceIn(0, 100)
 
     private var statView: TextView? = null
+    private var gameRowView: LinearLayout? = null
+
+    private fun updateGameUi() { gameRowView?.visibility = if (gOn) View.VISIBLE else View.GONE }
     private var activeTed: TedActor? = null
     private fun cur(): TedActor? = activeTed?.takeIf { teds.contains(it) } ?: teds.firstOrNull()
 
@@ -612,7 +615,7 @@ class OverlayService : Service() {
             if (duelPull == duelLoaded) {
                 duelOn = false
                 ui.postDelayed({ stopTheme() }, 3500)
-                say(a, "SPLASH! I'm soaked!", 3000)
+                say(a, "BANG! I'm hit!", 3000)
                 ui.postDelayed({ if (teds.contains(b)) say(b, "Ha! Got you.", 3000) }, 700)
                 a.happy = cl(a.happy - 10); b.happy = cl(b.happy + 10)
                 coins += 5; addXp(b, 8)
@@ -632,6 +635,7 @@ class OverlayService : Service() {
 
     // --- you vs Ted: lives, shells, items ---
     private var gOn = false
+    private var oneBullet = false
     private var gShots = 0
     private var pLives = 3
     private var tLives = 3
@@ -654,8 +658,8 @@ class OverlayService : Service() {
             (if (pItems.isEmpty()) "none" else pItems.joinToString(", "))
 
     private fun loadRound(log: StringBuilder) {
-        val total = (4..8).random()
-        val live = (1 until total).random()
+        val total = if (oneBullet) 6 else (4..8).random()
+        val live = if (oneBullet) 1 else (1 until total).random()
         shells.clear()
         repeat(live) { shells.add(true) }
         repeat(total - live) { shells.add(false) }
@@ -663,7 +667,7 @@ class OverlayService : Service() {
         pKnown = null; tKnown = null
         repeat((1..2).random()) { if (pItems.size < 4) pItems.add(itemPool.random()) }
         repeat((1..2).random()) { if (tItems.size < 4) tItems.add(itemPool.random()) }
-        log.append("New round: $total shells, $live splash and ${total - live} blank, in a random order. New items dealt.\n")
+        log.append("New round: $total shells, $live live and ${total - live} blank, in a random order. New items dealt.\n")
     }
 
     // returns true when the turn passes to the other side
@@ -681,11 +685,13 @@ class OverlayService : Service() {
         if (live) {
             val dmg = if (dbl) 2 else 1
             if (targetIsPlayer) pLives -= dmg else tLives -= dmg
-            log.append("SPLASH! ${if (targetIsPlayer) "You're" else "Ted's"} soaked (-$dmg).\n")
-            if (targetIsPlayer) setMood("happy") else setMood("surprised")
+            log.append("BANG! ${if (targetIsPlayer) "You're" else "Ted's"} hit (-$dmg).\n")
+            if (targetIsPlayer) { setMood("surprised"); cur()?.let { say(it, "Oops. Sorry!") } }
+            else { setMood("hurt"); cur()?.let { say(it, "Ow!") } }
             passes = true
         } else {
             log.append("click. Blank.\n")
+            if (!targetIsPlayer) setMood("scared")
             passes = !atSelf
         }
         if (pLives > 0 && tLives > 0 && shells.isEmpty()) {
@@ -707,8 +713,9 @@ class OverlayService : Service() {
         if (tLives <= 0) {
             gOn = false
             ui.postDelayed({ stopTheme() }, 2500)
-            reward(25, 15)
-            log.append("Ted is out of lives. You win! +25 coins.\n")
+            val prize = if (oneBullet) 30 else 25
+            reward(prize, 15)
+            log.append("Ted is out of lives. You win! +$prize coins.\n")
             return true
         }
         return false
@@ -726,7 +733,7 @@ class OverlayService : Service() {
         val k = tKnown
         val likelySplash = k == true || (k == null && shells.count { it } * 2 >= shells.size)
         if (!tDouble && likelySplash && tItems.remove("double")) {
-            tDouble = true; log.append("Ted loads a double-splash.\n")
+            tDouble = true; log.append("Ted loads a double round.\n")
         }
     }
 
@@ -770,7 +777,7 @@ class OverlayService : Service() {
             if (has(t, "magnifier", "peek", "look")) {
                 if (!pItems.remove("magnifier")) return "You don't have a magnifier."
                 pKnown = shells[0]
-                return "The next shell is " + (if (pKnown == true) "a SPLASH." else "a blank.")
+                return "The next shell is " + (if (pKnown == true) "a LIVE round." else "a blank.")
             }
             if (has(t, "cuff")) {
                 if (!pItems.remove("cuffs")) return "You don't have cuffs."
@@ -780,7 +787,7 @@ class OverlayService : Service() {
             if (has(t, "double")) {
                 if (!pItems.remove("double")) return "You don't have a double."
                 pDouble = true
-                return "Your next splash will do double."
+                return "Your next live round does double."
             }
             val self = t == "me" || t == "self" || has(t, "myself", "shoot me", "at me")
             val ted = t == "ted" || t == "him" || has(t, "shoot ted", "at ted", "shoot him")
@@ -797,22 +804,25 @@ class OverlayService : Service() {
             }
         }
 
-        if (has(t, "roulet")) {
+        if (has(t, "roulet", "sudden death", "one bullet", "1 bullet", "one live", "1 live")) {
             if (gOn) return "We're already playing. Say 'me' or 'ted' to fire."
             if (fighting) return "They're busy fighting right now."
             if (duelOn) return "The Teds are already playing."
             if (teds.size == 2) {
                 startDuel()
-                return "Two Teds, one toy water pistol, six chambers. Watch who gets soaked."
+                return "Two Teds, one bullet, six chambers. Watch who gets hit."
             }
             if (coins < 10) return "You need 10 coins to play."
             coins -= 10; gOn = true; gShots = 0
-            pLives = 3; tLives = 3; pItems.clear(); tItems.clear()
+            oneBullet = has(t, "sudden death", "one bullet", "1 bullet", "one live", "1 live")
+            pLives = if (oneBullet) 1 else 3; tLives = if (oneBullet) 1 else 3
+            pItems.clear(); tItems.clear()
             pDouble = false; tDouble = false; pCuffed = false; tCuffed = false
             val log = StringBuilder()
-            log.append("Water Pistol Roulette. Stake: 10 coins. Three lives each. ")
-            log.append("Shells are splash or blank. Say 'me' to shoot yourself (a blank means you go again) or 'ted' to shoot Ted. ")
-            log.append("Items: 'magnifier' peeks at the next shell, 'cuffs' skip his turn, 'double' doubles your next splash.\n")
+            log.append(if (oneBullet) "Sudden death: one bullet, six chambers, one life each. Stake: 10 coins, win 30. "
+                       else "Bullet Roulette. Stake: 10 coins. Three lives each. ")
+            log.append("Shells are live or blank. Use the buttons: 'At me' (a blank means you go again) or 'At Ted'. ")
+            log.append("Peek shows the next shell, Cuffs skip his turn, Double doubles your next live round.\n")
             loadRound(log)
             log.append(status())
             saveStats(); updateStatLine()
@@ -873,7 +883,7 @@ class OverlayService : Service() {
                 "Ted. Small, pale, always watching. Kidding. Mostly."
             ).random()
         if (has(t, "help", "what can you do", "commands"))
-            return "happy" to "Feed, pet, play, nap, and shop with the buttons. Say 'guess', 'rock paper scissors' or 'roulette' (a toy water pistol) to play for coins. 'play music' starts my boombox. Double-tap me to bring a friend, give both skins, and they fight."
+            return "happy" to "Feed, pet, play, nap, and shop with the buttons. Say 'guess', 'rock paper scissors', 'roulette' or 'one bullet' to play for coins. 'play music' starts my boombox. Double-tap me to bring a friend, give both skins, and they fight."
         if (has(t, "how are you", "how r u", "how you doing", "what's up", "whats up")) {
             val a = cur()
             if (a != null) {
@@ -962,6 +972,7 @@ class OverlayService : Service() {
         panel?.let { wm.removeView(it) }
         panel = null
         statView = null
+        gameRowView = null
     }
 
     private fun showPanel() {
@@ -1014,6 +1025,23 @@ class OverlayService : Service() {
         shopRow.addView(careBtn("Pizza 15") { buy(it, "pizza") })
         shopRow.addView(careBtn("Ball 10") { buy(it, "ball") })
         shopRow.addView(careBtn("Potion 20") { buy(it, "potion") })
+        val gamesRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; visibility = View.GONE
+        }
+        gamesRow.addView(careBtn("Roulette") { gamesRow.visibility = View.GONE; sendMessage("roulette") })
+        gamesRow.addView(careBtn("1 Bullet") { gamesRow.visibility = View.GONE; sendMessage("one bullet") })
+        gamesRow.addView(careBtn("Guess") { gamesRow.visibility = View.GONE; sendMessage("guess") })
+        gamesRow.addView(careBtn("RPS") { gamesRow.visibility = View.GONE; sendMessage("rock paper scissors") })
+
+        val gameRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; visibility = View.GONE
+        }
+        listOf("At me" to "me", "At Ted" to "ted", "Peek" to "magnifier",
+               "Cuffs" to "cuffs", "Double" to "double", "Quit" to "quit")
+            .forEach { (label, cmd) -> gameRow.addView(careBtn(label) { sendMessage(cmd) }) }
+        gameRowView = gameRow
+        updateGameUi()
+
         val careRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         careRow.addView(careBtn("Feed") { feed(it) })
         careRow.addView(careBtn("Pet") { pet(it) })
@@ -1021,6 +1049,9 @@ class OverlayService : Service() {
         careRow.addView(careBtn("Nap") { nap(it) })
         careRow.addView(careBtn("Shop") {
             shopRow.visibility = if (shopRow.visibility == View.GONE) View.VISIBLE else View.GONE
+        })
+        careRow.addView(careBtn("Game") {
+            gamesRow.visibility = if (gamesRow.visibility == View.GONE) View.VISIBLE else View.GONE
         })
 
         val log = TextView(this).apply {
@@ -1048,10 +1079,10 @@ class OverlayService : Service() {
             if (t.isNotEmpty()) { input.setText(""); sendMessage(t) }
         }
 
-        box.addView(header); box.addView(stats); box.addView(careRow); box.addView(shopRow); box.addView(sv); box.addView(row)
+        box.addView(header); box.addView(stats); box.addView(careRow); box.addView(shopRow); box.addView(gamesRow); box.addView(gameRow); box.addView(sv); box.addView(row)
 
         val w = (resources.displayMetrics.widthPixels * 0.92).toInt()
-        val h = (resources.displayMetrics.heightPixels * 0.58).toInt()
+        val h = (resources.displayMetrics.heightPixels * 0.64).toInt()
         val lp = LP(
             w, h, LP.TYPE_APPLICATION_OVERLAY, LP.FLAG_NOT_TOUCH_MODAL, PixelFormat.TRANSLUCENT
         ).apply {
@@ -1074,6 +1105,7 @@ class OverlayService : Service() {
         gameCommand(text)?.let { reply ->
             append("You: $text\n\n")
             append("Ted: $reply\n\n")
+            updateGameUi()
             return
         }
         musicCommand(text)?.let { reply ->
