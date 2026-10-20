@@ -48,6 +48,7 @@ class OverlayService : Service() {
         startForeground(1, buildNotification())
         addTed(dp(16), dp(200))
         loadStats()
+        refreshAll()
         ui.postDelayed(careTick, 20000)
     }
 
@@ -136,6 +137,10 @@ class OverlayService : Service() {
     }
 
     private fun moodDrawable(mood: String): Int {
+        if (madness > 0 && (mood == "neutral" || (madness >= 3 && mood in listOf("happy", "sleepy", "sad")))) {
+            val c = resources.getIdentifier("ted_crazy$madness", "drawable", packageName)
+            if (c != 0) return c
+        }
         val id = resources.getIdentifier("ted_$mood", "drawable", packageName)
         return if (id == 0) R.drawable.ted_neutral else id
     }
@@ -367,6 +372,26 @@ class OverlayService : Service() {
     private fun cur(): TedActor? = activeTed?.takeIf { teds.contains(it) } ?: teds.firstOrNull()
 
     private var coins = 50
+
+    // Ted gets crazier with every roulette round, and it is saved
+    private var madness = 0   // 0 = calm ... 5 = completely gone
+
+    private fun madnessLine(): String = when (madness) {
+        1 -> "Ted blinks hard. Something feels off."
+        2 -> "Ted's smile twitches. His eyes are red."
+        3 -> "Ted laughs. It isn't funny."
+        4 -> "Ted stopped blinking a while ago."
+        else -> "Ted is completely gone. Hehehe."
+    }
+
+    private fun crazyLines(): List<String> = when {
+        madness >= 5 -> listOf("hehehe", "THEY'RE ALL LISTENING", "Did you hear that? Again. Again. Again.",
+            "I can see through the screen.", "Play with me. Play with me.")
+        madness >= 4 -> listOf("Why aren't you blinking?", "Hehe. Hehehe.", "Round and round and round.",
+            "Don't leave me alone with them.")
+        madness >= 3 -> listOf("Did you hear that?", "Something is behind the screen.", "I'm fine. I'm FINE.")
+        else -> listOf("Hm? What? Sorry. Zoned out.", "Was that a click?")
+    }
     private fun need(l: Int) = 40 + 10 * l
 
     private fun updateStatLine() {
@@ -374,7 +399,8 @@ class OverlayService : Service() {
         val n = teds.indexOf(a) + 1
         statView?.text = "Ted $n  \u00B7  Lv ${a.level} (${a.xp}/${need(a.level)} XP)  \u00B7  Coins: $coins\n" +
             "\uD83C\uDF4E ${a.hunger}   \u2764 ${a.happy}   \u26A1 ${a.energy}" +
-            (if (a.wins > 0) "   \uD83C\uDFC6 ${a.wins}" else "")
+            (if (a.wins > 0) "   \uD83C\uDFC6 ${a.wins}" else "") +
+            (if (madness > 0) "   Madness $madness/5" else "")
     }
 
     private fun addXp(a: TedActor, n: Int) {
@@ -429,6 +455,9 @@ class OverlayService : Service() {
                 warn(a)
             }
             if (teds.any { it.happy > 50 }) coins += 1
+            if (madness >= 3 && !fighting && !gOn && (1..3).random() == 1) {
+                teds.firstOrNull()?.let { say(it, crazyLines().random(), 3500) }
+            }
             saveStats(); updateStatLine()
             ui.postDelayed(this, 20000)
         }
@@ -452,7 +481,8 @@ class OverlayService : Service() {
         val a = teds.firstOrNull() ?: return
         getSharedPreferences("ted", MODE_PRIVATE).edit()
             .putInt("hunger", a.hunger).putInt("happy", a.happy).putInt("energy", a.energy)
-            .putInt("coins", coins).putInt("level", a.level).putInt("xp", a.xp).apply()
+            .putInt("coins", coins).putInt("level", a.level).putInt("xp", a.xp)
+            .putInt("madness", madness).apply()
     }
 
     private fun loadStats() {
@@ -460,6 +490,7 @@ class OverlayService : Service() {
         val p = getSharedPreferences("ted", MODE_PRIVATE)
         a.hunger = p.getInt("hunger", 80); a.happy = p.getInt("happy", 80); a.energy = p.getInt("energy", 80)
         coins = p.getInt("coins", 50); a.level = p.getInt("level", 1); a.xp = p.getInt("xp", 0)
+        madness = p.getInt("madness", 0)
     }
 
     // ---------- moods ----------
@@ -658,6 +689,9 @@ class OverlayService : Service() {
             (if (pItems.isEmpty()) "none" else pItems.joinToString(", "))
 
     private fun loadRound(log: StringBuilder) {
+        if (madness < 5) madness++
+        saveStats(); refreshAll(); updateStatLine()
+        log.append(madnessLine()).append("\n")
         val total = if (oneBullet) 6 else (4..8).random()
         val live = if (oneBullet) 1 else (1 until total).random()
         shells.clear()
@@ -760,6 +794,18 @@ class OverlayService : Service() {
 
     private fun gameCommand(raw: String): String? {
         val t = raw.lowercase().trim().trimEnd('!', '.')
+
+        if (has(t, "calm down", "calm ted", "therapy")) {
+            if (madness == 0) return "I'm already calm."
+            if (coins < 30) return "Calming me down costs 30 coins."
+            coins -= 30; madness--
+            saveStats(); refreshAll(); updateStatLine()
+            return if (madness == 0) "...Oh. I'm back. What happened?" else "Breathe in. Breathe out. A little better."
+        }
+        if (t == "reset ted" || t == "reset madness") {
+            madness = 0; saveStats(); refreshAll(); updateStatLine()
+            return "Ted blinks. Where am I?"
+        }
 
         if (gOn) {
             val log = StringBuilder()
@@ -883,7 +929,10 @@ class OverlayService : Service() {
                 "Ted. Small, pale, always watching. Kidding. Mostly."
             ).random()
         if (has(t, "help", "what can you do", "commands"))
-            return "happy" to "Feed, pet, play, nap, and shop with the buttons. Say 'guess', 'rock paper scissors', 'roulette' or 'one bullet' to play for coins. 'play music' starts my boombox. Double-tap me to bring a friend, give both skins, and they fight."
+            return "happy" to "Feed, pet, play, nap, and shop with the buttons. Say 'guess', 'rock paper scissors', 'roulette' or 'one bullet' to play for coins. Every roulette round makes me crazier, and it sticks. 'calm down' costs 30 coins. 'play music' starts my boombox. Double-tap me to bring a friend, give both skins, and they fight."
+        if (madness >= 2 && (1..10).random() <= madness * 2) {
+            return (if (madness >= 4) "surprised" else "scared") to crazyLines().random()
+        }
         if (has(t, "how are you", "how r u", "how you doing", "what's up", "whats up")) {
             val a = cur()
             if (a != null) {
