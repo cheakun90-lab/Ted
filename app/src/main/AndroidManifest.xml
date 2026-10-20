@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
+        android:allowBackup="false"
         android:icon="@drawable/ted_neutral"
         android:label="Ted"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">

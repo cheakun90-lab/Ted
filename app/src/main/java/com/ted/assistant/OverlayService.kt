@@ -49,7 +49,7 @@ class OverlayService : Service() {
         addTed(dp(16), dp(200))
         loadStats()
         refreshAll()
-        ui.postDelayed(careTick, 20000)
+        if (dead) refreshDocks() else ui.postDelayed(careTick, 20000)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
@@ -58,10 +58,15 @@ class OverlayService : Service() {
         player?.release(); player = null
         musicPlayer?.release(); musicPlayer = null
         ui.removeCallbacks(fightTick); ui.removeCallbacks(koReset); ui.removeCallbacks(careTick); ui.removeCallbacks(duelTick)
+        ui.removeCallbacks(hideGun); hideGun.run()
         stopTheme()
         saveStats()
         hidePanel()
-        teds.toList().forEach { hideBubble(it); try { wm.removeView(it.root) } catch (e: Exception) {} }
+        teds.toList().forEach {
+            hideBubble(it)
+            try { wm.removeView(it.root) } catch (e: Exception) {}
+            try { wm.removeView(it.dock) } catch (e: Exception) {}
+        }
         teds.clear()
         super.onDestroy()
     }
@@ -86,6 +91,13 @@ class OverlayService : Service() {
         var hp = 100; var hunger = 80; var happy = 80; var energy = 80; var wins = 0
         var xp = 0; var level = 1
         var lastWarn = 0L
+        val dock = LinearLayout(this@OverlayService)
+        val dockLp = LP(
+            LP.WRAP_CONTENT, LP.WRAP_CONTENT, LP.TYPE_APPLICATION_OVERLAY,
+            LP.FLAG_NOT_FOCUSABLE or LP.FLAG_LAYOUT_NO_LIMITS, PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.START }
+        var dockMode = "main"
+        val dockStats = TextView(this@OverlayService)
         val hpBg = FrameLayout(this@OverlayService)
         val hpFill = View(this@OverlayService)
         var bubble: TextView? = null
@@ -126,17 +138,32 @@ class OverlayService : Service() {
         refresh(a)
         wm.addView(a.root, a.lp)
         teds.add(a)
+
+        a.dock.orientation = LinearLayout.VERTICAL
+        a.dock.background = GradientDrawable().apply {
+            setColor(Color.parseColor("#B015151C")); cornerRadius = dp(12).toFloat()
+        }
+        a.dock.setPadding(dp(3), dp(3), dp(3), dp(3))
+        a.dockStats.setTextColor(Color.parseColor("#DDDDDD")); a.dockStats.textSize = 10f
+        positionDock(a)
+        wm.addView(a.dock, a.dockLp)
+        setDockMode(a, "main")
     }
 
     private fun removeTed(a: TedActor) {
         hideBubble(a)
         if (activeTed === a) activeTed = null
         try { wm.removeView(a.root) } catch (e: Exception) {}
+        try { wm.removeView(a.dock) } catch (e: Exception) {}
         teds.remove(a)
         checkFight()
     }
 
     private fun moodDrawable(mood: String): Int {
+        if (gOn && mood == "neutral") {            // Ted is scared the whole time the gun is out
+            val sc = resources.getIdentifier("ted_scared", "drawable", packageName)
+            if (sc != 0) return sc
+        }
         if (madness > 0 && (mood == "neutral" || (madness >= 3 && mood in listOf("happy", "sleepy", "sad")))) {
             val c = resources.getIdentifier("ted_crazy$madness", "drawable", packageName)
             if (c != 0) return c
@@ -147,6 +174,7 @@ class OverlayService : Service() {
 
     private fun refresh(a: TedActor) {
         val id = when {
+            dead -> R.drawable.ted_dead
             a.skin > 0 -> resources.getIdentifier(skinNames[a.skin - 1], "drawable", packageName)
             musicOn -> R.drawable.ted_music
             else -> moodDrawable(curMood)
@@ -167,6 +195,7 @@ class OverlayService : Service() {
     private var pendingSingle: Runnable? = null
 
     private fun onTap(a: TedActor) {
+        if (dead) { say(a, "R.I.P. Ted. He can't come back.", 3000); return }
         val now = SystemClock.uptimeMillis()
         if (now - lastTap < 320) {
             pendingSingle?.let { ui.removeCallbacks(it) }
@@ -220,6 +249,7 @@ class OverlayService : Service() {
                         a.lp.x = startX + dx.toInt(); a.lp.y = startY + dy.toInt()
                         wm.updateViewLayout(a.root, a.lp)
                         moveBubble(a)
+                        positionDock(a)
                     }
                 }
                 MotionEvent.ACTION_UP -> {
@@ -230,6 +260,139 @@ class OverlayService : Service() {
             }
             true
         }
+    }
+
+    // ---------- floating buttons beside Ted ----------
+    private fun positionDock(a: TedActor) {
+        val sw = resources.displayMetrics.widthPixels
+        val dw = dp(80)
+        a.dockLp.x = if (a.lp.x + dp(112) + dw <= sw) a.lp.x + dp(112) else maxOf(0, a.lp.x - dw - dp(2))
+        a.dockLp.y = maxOf(0, a.lp.y)
+        try { wm.updateViewLayout(a.dock, a.dockLp) } catch (e: Exception) { }
+    }
+
+    private fun dockBtn(label: String, onClick: () -> Unit) = Button(this).apply {
+        text = label; textSize = 11f; isAllCaps = false
+        minHeight = 0; minimumHeight = 0; minWidth = 0; minimumWidth = 0
+        setPadding(dp(2), 0, dp(2), 0)
+        layoutParams = LinearLayout.LayoutParams(dp(72), dp(32)).apply { topMargin = dp(2) }
+        setOnClickListener { onClick() }
+    }
+
+    private fun setDockMode(a: TedActor, mode: String) {
+        a.dockMode = mode
+        a.dock.removeAllViews()
+        if (dead) { a.dock.visibility = View.GONE; return }
+        a.dock.visibility = View.VISIBLE
+        when (mode) {
+            "shop" -> {
+                a.dock.addView(dockBtn("Pizza 15") { buy(a, "pizza") })
+                a.dock.addView(dockBtn("Ball 10") { buy(a, "ball") })
+                a.dock.addView(dockBtn("Potion 20") { buy(a, "potion") })
+                a.dock.addView(dockBtn("Back") { setDockMode(a, "main") })
+            }
+            "game" -> {
+                listOf("Roulette" to "roulette", "1 Bullet" to "one bullet", "Guess" to "guess",
+                       "RPS" to "rock paper scissors", "Spin gun" to "spin the gun").forEach { (label, cmd) ->
+                    a.dock.addView(dockBtn(label) { activeTed = a; setDockMode(a, "main"); sendMessage(cmd) })
+                }
+                a.dock.addView(dockBtn("Back") { setDockMode(a, "main") })
+            }
+            "play" -> {
+                listOf("At me" to "me", "At Ted" to "ted", "Peek" to "magnifier",
+                       "Cuffs" to "cuffs", "Double" to "double", "Spin gun" to "spin the gun",
+                       "Quit" to "quit").forEach { (label, cmd) ->
+                    a.dock.addView(dockBtn(label) { activeTed = a; sendMessage(cmd) })
+                }
+            }
+            else -> {
+                a.dock.addView(a.dockStats)
+                a.dock.addView(dockBtn("Feed") { activeTed = a; feed(a) })
+                a.dock.addView(dockBtn("Pet") { activeTed = a; pet(a) })
+                a.dock.addView(dockBtn("Play") { activeTed = a; play(a) })
+                a.dock.addView(dockBtn("Nap") { activeTed = a; nap(a) })
+                a.dock.addView(dockBtn("Shop") { setDockMode(a, "shop") })
+                a.dock.addView(dockBtn("Game") { setDockMode(a, "game") })
+                a.dock.addView(dockBtn("Chat") { activeTed = a; togglePanel() })
+            }
+        }
+        updateStatLine()
+        try { wm.updateViewLayout(a.dock, a.dockLp) } catch (e: Exception) { }
+    }
+
+    private fun refreshDocks() {
+        teds.forEach { a ->
+            val want = when {
+                dead -> "dead"
+                gOn && a === cur() -> "play"
+                a.dockMode == "play" -> "main"
+                else -> a.dockMode
+            }
+            if (want != a.dockMode || dead) setDockMode(a, want)
+        }
+    }
+
+    // ---------- shaking, the deadly spin, and permanent death ----------
+    private var dead = false
+    private var spinning = false
+
+    private fun shake(a: TedActor, ms: Long) {
+        val baseX = a.lp.x
+        val end = SystemClock.uptimeMillis() + ms
+        val r = object : Runnable {
+            override fun run() {
+                if (!teds.contains(a)) return
+                val done = SystemClock.uptimeMillis() > end
+                a.lp.x = if (done) baseX else baseX + (-dp(5)..dp(5)).random()
+                try { wm.updateViewLayout(a.root, a.lp) } catch (e: Exception) { }
+                moveBubble(a)
+                if (!done) ui.postDelayed(this, 40)
+            }
+        }
+        ui.post(r)
+    }
+
+    private fun startDeathSpin(a: TedActor) {
+        spinning = true
+        ui.removeCallbacks(resetMood)
+        curMood = "terrified"; refreshAll()
+        shake(a, 4300)
+        say(a, "NO NO NO NO NO!", 1400)
+        ui.postDelayed({ if (teds.contains(a) && !dead) say(a, "I don't want to die!", 1400) }, 1500)
+        ui.postDelayed({ if (teds.contains(a) && !dead) say(a, "Please... please...", 1300) }, 3000)
+        ui.postDelayed({ if (teds.contains(a) && !dead) resolveSpin(a) }, 4400)
+    }
+
+    private fun resolveSpin(a: TedActor) {
+        spinning = false
+        showGun(a, true)
+        if ((1..6).random() == 1) {
+            playBang()
+            killTed(a)
+        } else {
+            say(a, "...click.", 2000)
+            coins += 15; addXp(a, 15)
+            if (madness < 5) madness++
+            saveStats(); refreshAll(); updateStatLine()
+            ui.postDelayed({
+                if (teds.contains(a) && !dead) { setMood("scared"); say(a, "I'm alive?! I'M ALIVE?!", 3000) }
+            }, 1400)
+        }
+    }
+
+    // Ted stays dead. The save remembers it, and only a fresh install starts him over.
+    private fun killTed(a: TedActor) {
+        dead = true
+        spinning = false; gOn = false; duelOn = false; fighting = false
+        ui.removeCallbacks(fightTick); ui.removeCallbacks(koReset); ui.removeCallbacks(duelTick)
+        ui.removeCallbacks(careTick); ui.removeCallbacks(resetMood)
+        stopMusic(); stopTheme()
+        hidePanel()
+        teds.forEach { it.hpBg.visibility = View.GONE }
+        saveStats()
+        refreshAll(); refreshDocks()
+        say(a, "...", 1800)
+        ui.postDelayed({ if (teds.contains(a)) say(a, "R.I.P. Ted", 6000) }, 1800)
     }
 
     // ---------- speech bubbles ----------
@@ -367,7 +530,11 @@ class OverlayService : Service() {
     private var statView: TextView? = null
     private var gameRowView: LinearLayout? = null
 
-    private fun updateGameUi() { gameRowView?.visibility = if (gOn) View.VISIBLE else View.GONE }
+    private fun updateGameUi() {
+        gameRowView?.visibility = if (gOn) View.VISIBLE else View.GONE
+        refreshDocks()
+        refreshAll()
+    }
     private var activeTed: TedActor? = null
     private fun cur(): TedActor? = activeTed?.takeIf { teds.contains(it) } ?: teds.firstOrNull()
 
@@ -395,6 +562,10 @@ class OverlayService : Service() {
     private fun need(l: Int) = 40 + 10 * l
 
     private fun updateStatLine() {
+        teds.forEach { t ->
+            t.dockStats.text = "Lv ${t.level}  \u00B7  $coins coins\n" +
+                "\uD83C\uDF4E${t.hunger} \u2764${t.happy} \u26A1${t.energy}"
+        }
         val a = cur() ?: return
         val n = teds.indexOf(a) + 1
         statView?.text = "Ted $n  \u00B7  Lv ${a.level} (${a.xp}/${need(a.level)} XP)  \u00B7  Coins: $coins\n" +
@@ -448,6 +619,7 @@ class OverlayService : Service() {
 
     private val careTick = object : Runnable {
         override fun run() {
+            if (dead) return
             teds.forEach { a ->
                 a.hunger = cl(a.hunger - 3)
                 a.happy = cl(a.happy - if (a.hunger < 25) 3 else 2)
@@ -482,7 +654,7 @@ class OverlayService : Service() {
         getSharedPreferences("ted", MODE_PRIVATE).edit()
             .putInt("hunger", a.hunger).putInt("happy", a.happy).putInt("energy", a.energy)
             .putInt("coins", coins).putInt("level", a.level).putInt("xp", a.xp)
-            .putInt("madness", madness).apply()
+            .putInt("madness", madness).putBoolean("dead", dead).apply()
     }
 
     private fun loadStats() {
@@ -491,13 +663,14 @@ class OverlayService : Service() {
         a.hunger = p.getInt("hunger", 80); a.happy = p.getInt("happy", 80); a.energy = p.getInt("energy", 80)
         coins = p.getInt("coins", 50); a.level = p.getInt("level", 1); a.xp = p.getInt("xp", 0)
         madness = p.getInt("madness", 0)
+        dead = p.getBoolean("dead", false)
     }
 
     // ---------- moods ----------
     private val resetMood = Runnable { curMood = "neutral"; refreshAll() }
 
     private fun setMood(mood: String) {
-        if (musicOn) return
+        if (dead || musicOn) return
         curMood = mood
         refreshAll()
         ui.removeCallbacks(resetMood)
@@ -616,6 +789,49 @@ class OverlayService : Service() {
     }
 
     // ---------- Water Pistol Roulette (with the tension theme) ----------
+    // ---------- the revolver prop and the BANG sound ----------
+    private var gunView: ImageView? = null
+    private val hideGun = Runnable {
+        gunView?.let { try { wm.removeView(it) } catch (e: Exception) { } }
+        gunView = null
+    }
+
+    // atTed = the gun points at Ted; otherwise it points away from him
+    private fun showGun(a: TedActor, atTed: Boolean) {
+        ui.removeCallbacks(hideGun); hideGun.run()
+        val gw = dp(90)
+        val sw = resources.displayMetrics.widthPixels
+        val right = a.lp.x + dp(100) + gw <= sw
+        val pointsLeft = atTed == right            // the picture points left by default
+        val iv = ImageView(this).apply {
+            setImageResource(R.drawable.ted_gun)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            if (!pointsLeft) scaleX = -1f
+        }
+        val lp = LP(
+            gw, dp(56), LP.TYPE_APPLICATION_OVERLAY,
+            LP.FLAG_NOT_FOCUSABLE or LP.FLAG_NOT_TOUCHABLE or LP.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = if (right) a.lp.x + dp(100) else (a.lp.x - gw + dp(10)).coerceAtLeast(0)
+            y = (a.lp.y + dp(40)).coerceAtLeast(0)
+        }
+        try { wm.addView(iv, lp); gunView = iv } catch (e: Exception) { }
+        ui.postDelayed(hideGun, 1200)
+    }
+
+    private fun playBang() {
+        val id = resources.getIdentifier("ted_bang", "raw", packageName)
+        if (id == 0) return
+        try {
+            MediaPlayer.create(this, id)?.apply {
+                setOnCompletionListener { it.release() }
+                start()
+            }
+        } catch (e: Exception) { }
+    }
+
     private var themePlayer: MediaPlayer? = null
 
     private fun startTheme() {
@@ -645,6 +861,7 @@ class OverlayService : Service() {
             val b = teds[duelPull % 2]
             if (duelPull == duelLoaded) {
                 duelOn = false
+                showGun(a, true); playBang()
                 ui.postDelayed({ stopTheme() }, 3500)
                 say(a, "BANG! I'm hit!", 3000)
                 ui.postDelayed({ if (teds.contains(b)) say(b, "Ha! Got you.", 3000) }, 700)
@@ -653,6 +870,7 @@ class OverlayService : Service() {
                 saveStats(); updateStatLine()
                 return
             }
+            showGun(a, true)
             say(a, listOf("Click.", "Phew.", "Safe...", "Click. Your turn.").random())
             ui.postDelayed(this, 2600)
         }
@@ -728,6 +946,8 @@ class OverlayService : Service() {
             if (!targetIsPlayer) setMood("scared")
             passes = !atSelf
         }
+        cur()?.let { showGun(it, !targetIsPlayer) }
+        if (live) playBang()
         if (pLives > 0 && tLives > 0 && shells.isEmpty()) {
             loadRound(log)
             reloaded = true
@@ -794,6 +1014,13 @@ class OverlayService : Service() {
 
     private fun gameCommand(raw: String): String? {
         val t = raw.lowercase().trim().trimEnd('!', '.')
+
+        if (has(t, "spin the gun", "spin the revolver", "spin the cylinder", "spin gun", "spin it")) {
+            if (spinning) return "The cylinder is still spinning..."
+            val a = cur() ?: return null
+            startDeathSpin(a)
+            return "You spin the cylinder. Ted freezes."
+        }
 
         if (has(t, "calm down", "calm ted", "therapy")) {
             if (madness == 0) return "I'm already calm."
@@ -929,7 +1156,7 @@ class OverlayService : Service() {
                 "Ted. Small, pale, always watching. Kidding. Mostly."
             ).random()
         if (has(t, "help", "what can you do", "commands"))
-            return "happy" to "Feed, pet, play, nap, and shop with the buttons. Say 'guess', 'rock paper scissors', 'roulette' or 'one bullet' to play for coins. Every roulette round makes me crazier, and it sticks. 'calm down' costs 30 coins. 'play music' starts my boombox. Double-tap me to bring a friend, give both skins, and they fight."
+            return "happy" to "The buttons float beside me: feed, pet, play, nap, shop. Say 'spin the gun' if you dare. If I die, I stay dead. Say 'guess', 'rock paper scissors', 'roulette' or 'one bullet' to play for coins. Every roulette round makes me crazier, and it sticks. 'calm down' costs 30 coins. 'play music' starts my boombox. Double-tap me to bring a friend, give both skins, and they fight."
         if (madness >= 2 && (1..10).random() <= madness * 2) {
             return (if (madness >= 4) "surprised" else "scared") to crazyLines().random()
         }
@@ -1105,7 +1332,7 @@ class OverlayService : Service() {
 
         val log = TextView(this).apply {
             setTextColor(Color.parseColor("#DDDDDD")); textSize = 15f
-            text = "Ted: Hi. I'm Ted. Say something, or say 'play music'.\n\n"
+            text = chatLog.toString()
         }
         val sv = ScrollView(this).apply {
             addView(log)
@@ -1128,10 +1355,10 @@ class OverlayService : Service() {
             if (t.isNotEmpty()) { input.setText(""); sendMessage(t) }
         }
 
-        box.addView(header); box.addView(stats); box.addView(careRow); box.addView(shopRow); box.addView(gamesRow); box.addView(gameRow); box.addView(sv); box.addView(row)
+        box.addView(header); box.addView(stats); box.addView(sv); box.addView(row)
 
         val w = (resources.displayMetrics.widthPixels * 0.92).toInt()
-        val h = (resources.displayMetrics.heightPixels * 0.64).toInt()
+        val h = (resources.displayMetrics.heightPixels * 0.42).toInt()
         val lp = LP(
             w, h, LP.TYPE_APPLICATION_OVERLAY, LP.FLAG_NOT_TOUCH_MODAL, PixelFormat.TRANSLUCENT
         ).apply {
@@ -1143,13 +1370,21 @@ class OverlayService : Service() {
         panel = box
     }
 
+    private val chatLog = StringBuilder("Ted: Hi. I'm Ted. Say something, or say 'play music'.\n\n")
+
     private fun append(s: String) {
+        chatLog.append(s)
+        if (chatLog.length > 8000) chatLog.delete(0, chatLog.length - 6000)
         logView?.append(s)
         scroll?.post { scroll?.fullScroll(ScrollView.FOCUS_DOWN) }
+        if (panel == null && s.startsWith("Ted: ")) {
+            cur()?.let { say(it, s.removePrefix("Ted: ").trim().take(240), 5000) }
+        }
     }
 
     // ---------- Claude ----------
     private fun sendMessage(text: String) {
+        if (dead) return
         val key = getSharedPreferences("ted", MODE_PRIVATE).getString("apikey", "") ?: ""
         gameCommand(text)?.let { reply ->
             append("You: $text\n\n")
